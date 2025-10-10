@@ -1,4 +1,4 @@
-# footballmvp Analyzer?
+# footballmvp Analyzer
 
 This project calculates the Most Valuable Player (MVP) for professional football leagues and tournaments using player performance statistics.
 
