@@ -44,31 +44,34 @@ logging.basicConfig(level=logging.INFO)
 
 
 class AllCompetitions:
-    """
-    This class is responsible for gathering competition data from Fotmob and managing a local watchlist.
+    """Scrape FotMob competitions and manage a local competition watchlist.
+
+
+    This class fetches competition metadata from FotMob, normalizes league
+    names, and appends selected competitions to a local Spark-backed CSV
+    watchlist stored under the `all_comps_df/` directory.
+
 
     Attributes:
-        fotmob_leagues_url (str): URL for accessing Fotmob leagues.
-        last_competition_index (int): Index for the last competition.
-        start_competition_index (int): Index for the starting competition.
+    fotmob_leagues_url (str): Base URL for FotMob leagues.
+    last_competitiion_index (int): Upper bound index used by the author for iteration.
+    start_competition_index (int): Lower bound index used by the author for iteration.
 
-    Methods:
-        gather_all_competition_ids(url: str) -> Dict:
-            Fetches all competition IDs from Fotmob, processes the data, and returns a dictionary
-            of competition IDs and their formatted names.
 
-        format_competition_names(tournament_prefixes_dict: Dict) -> Dict:
-            Processes and formats the competition names to a cleaner format for use.
-
-        add_competition_to_my_watchlist(competition_name: str, gather_all_competition_ids: Dict, defined_url: str = "") -> str:
-            Adds a new competition to the watchlist, either by looking up the competition name or using a defined URL.
-
-    Example:
-        >>> comp = AllCompetitions()
-        >>> all_ids = comp.gather_all_competition_ids("https://www.fotmob.com/")
-        >>> comp.add_competition_to_my_watchlist("serie-a", all_ids)
-    """   
+    Examples:
+    >>> all_comps = AllCompetitions()
+    >>> all_ids = all_comps.gather_all_competition_ids(all_comps.fotmob_leagues_url)
+    >>> all_comps.add_competition_to_my_watchlist("mls", all_ids)
+    "New Competition Added: mls" # or a duplicate/created message
+    """  
     def __init__(self):
+        """Initialize defaults for FotMob league scraping and indexing.
+
+
+        Examples:
+        >>> AllCompetitions() # basic construction
+        Fotmob Leagues URL: https://www.fotmob.com/leagues, Starting Index for Competitions 38, Ending Index for Competitions 306 # doctest: +ELLIPSIS
+        """
         self.fotmob_leagues_url = "https://www.fotmob.com/leagues"
         self.last_competitiion_index = 306
         self.start_competition_index = 38
@@ -76,24 +79,53 @@ class AllCompetitions:
 
 
     def __repr__(self):
+        """Return a concise summary of key AllCompetitions settings.
+
+
+        Examples:
+        >>> repr(AllCompetitions()) # doctest: +ELLIPSIS
+        'Fotmob Leagues URL: https://www.fotmob.com/leagues, Starting Index for Competitions 38, Ending Index for Competitions 306'
+        """
         return f"Fotmob Leagues URL: {self.fotmob_leagues_url}, Starting Index for Competitions {self.start_competition_index}, Ending Index for Competitions {self.last_competitiion_index}"
 
 
 
     def gather_all_competition_ids(self, url: str)->Dict:
-        """
-        Fetches and processes competition IDs from Fotmob's main leagues page.
+        """Fetch competition IDs and names from a FotMob leagues page.
+
+
+        The page contains a JSON blob (`__NEXT_DATA__`) with translation
+        mappings. This method extracts the TournamentPrefixes mapping and
+        returns a normalized dictionary of `{id: formatted_name}`.
+
+
+        Print this out to view competition names
+        NOTE: Not all competitions will be included in the json output
+        Therefore do the following: 
+        - Use the defined_url parameter to specify a tournament or league that is not included.
+        - And/Or include a manual_competition_id if there are other competitions with the same name e.g. There is a premier-league in both England and Canada
+
+
 
         Args:
-            url (str): The URL of the Fotmob leagues page.
+        url: URL of the FotMob leagues page (e.g., "https://www.fotmob.com/leagues").
+
 
         Returns:
-            Dict: A dictionary where keys are competition IDs and values are formatted competition names.
+        Dict: Mapping from competition ID (str) to normalized competition name (str).
 
-        Example:
-            >>> comp = AllCompetitions()
-            >>> comp_ids = comp.gather_all_competition_ids("https://www.fotmob.com/")
-            >>> print(comp_ids["55"])
+
+        Raises:
+        requests.exceptions.RequestException: If the HTTP request fails.
+        KeyError: If expected keys are missing in the page JSON.
+        json.JSONDecodeError: If the embedded JSON cannot be parsed.
+
+
+        Examples:
+        >>> comp = AllCompetitions()
+        >>> comp_ids = comp.gather_all_competition_ids(comp.fotmob_leagues_url)
+        >>> comp_ids.get("47") # Premier League, for example
+        'premier-league' # value depends on site content
         """
         html_doc = requests.get(url)
         html_doc_text = html_doc.text
@@ -103,47 +135,88 @@ class AllCompetitions:
         scripts_json = json.loads(scripts_str)
         tournament_prefixes_dict = scripts_json["props"]["pageProps"]["fallback"]["/api/translationmapping?locale=en"]["TournamentPrefixes"]
         new_comp_dict = self.format_competition_names(tournament_prefixes_dict)
-
-        # Print this out to view competition names.
+        """
+        Print this out to view competition names
+        NOTE: Not all competetitions will be included in this json output
+        Therefore do the following: 
+        - Use the defined_url parameter to specify a tournament or league that is not included.
+        - And/Or include a manual_competition_id if there are other competitions with the same name e.g. There is a premier-league in both England and Canada
+        """
         return new_comp_dict
 
 
 
     def format_competition_names(self, tournament_prefixes_dict: Dict)->Dict: 
-        """
-        Formats raw competition names to be lowercase, hyphenated, and standardized.
+        """Normalize raw competition names to a kebab-case format.
+
+
+        Normalization rules:
+        - Lowercase
+        - Spaces -> hyphens
+        - "(w)" -> "qualification"
+        - "(women)" -> "women"
+        - Remove periods
+
 
         Args:
-            tournament_prefixes_dict (Dict): Raw dictionary of competition ID to name.
+        tournament_prefixes_dict: Raw mapping from competition ID to display name.
+
 
         Returns:
-            Dict: Cleaned-up dictionary with competition IDs as keys and formatted names as values.
+        Dict: `{id: normalized_name}` suitable for URLs and folder names.
 
-        Example:
-            >>> raw_dict = {"55": "Serie A", "72": "La Liga"}
-            >>> comp = AllCompetitions()
-            >>> formatted = comp.format_competition_names(raw_dict)
-            >>> print(formatted["55"])  # Output: 'serie-a'
+
+        Examples:
+        >>> AllCompetitions().format_competition_names({"55": "Serie A", "72": "La Liga"})
+        {'55': 'serie-a', '72': 'la-liga'}
         """
         new_comp_dict = {i[0]: i[1].lower().replace(" ", "-").replace("(w)", "qualification").replace("(women)", "women").replace(".", "") for i in tournament_prefixes_dict.items()}
         return new_comp_dict
     
 
     def add_competition_to_my_watchlist(self, competition_name: str, gather_all_competition_ids: Dict, defined_url: str = "") -> str:
-        """
-        Adds a competition to the local watchlist CSV (Spark-based) either by:
-        - Matching a formatted competition name with its ID from provided dictionary, OR
-        - Using a full URL to extract ID and name directly.
+        """Append a competition to the local watchlist CSV.
 
-        Automatically creates the all_comps_df directory if it doesn't exist.
+
+        You can either:
+        1) Provide a normalized `competition_name` present in `gather_all_competition_ids`,
+        or
+        2) Provide a `defined_url` of the form
+        "https://www.fotmob.com/leagues/<id>/matches/<name>"
+
+
+        Creates `all_comps_df/` if it does not exist. Uses Spark to write/append CSV.
+
 
         Args:
-            competition_name (str): The formatted name of the competition (e.g., 'serie-a').
-            gather_all_competition_ids (Dict): Dictionary of competition IDs and names from `gather_all_competition_ids`.
-            defined_url (str, optional): Full Fotmob competition URL. Defaults to "".
+        competition_name: Normalized competition name (e.g., 'serie-a').
+        gather_all_competition_ids: Mapping from ID -> normalized name (output of
+        `gather_all_competition_ids`).
+        defined_url: Optional explicit FotMob URL containing ID and name.
+
 
         Returns:
-            str: Status message indicating whether the competition was added or already exists.
+        str: Human-readable status about creation, addition, or duplicates.
+
+        Examples:
+        Add by normalized name:
+
+
+        >>> all_comps = AllCompetitions()
+        >>> ids = all_comps.gather_all_competition_ids(all_comps.fotmob_leagues_url)
+        >>> all_comps.add_competition_to_my_watchlist("open-cup", ids)
+        'New Competition Added: open-cup' # or duplicate message
+
+
+        Add by explicit URL:
+
+
+        >>> all_comps.add_competition_to_my_watchlist(
+        ... competition_name="",
+        ... gather_all_competition_ids={},
+        ... defined_url="https://www.fotmob.com/leagues/77/matches/world-cup",
+        ... )
+        'Watchlist created and competition ' # first-time create or appended
         """
         if not defined_url:
             all_competition_ids = gather_all_competition_ids.items()
@@ -220,56 +293,68 @@ class AllCompetitions:
 
 
 class Competition:
-    """
-    This class is used to choose a specific competition, fetch its match links, and save the data.
-    
-    Attributes:
-        competition_name (str): Name of the competition.
-        year (int): Year of the competition.
-        
-    Methods:
-        choose_competition(competition_name: str, competition_year: str) -> None:
-            Loads the selected competition's match data, processes it, and saves it to a CSV.
-        
-        contain_all_match_links(competition_id: int, competition_name: str, competition_year: str) -> List:
-            Extracts all match links for a given competition.
+    """Collect match links for a competition and persist them to CSV.
 
-        extract_match_links_per_page(url: str) -> List:
-            Extracts match links from a single page of Fotmob's website.
-    
-    Example:
-        comp = Competition()
-        comp.choose_competition("premier-league", 2023)
+    Finds the competition in the local watchlist, paginates FotMob match listings,
+    and writes the consolidated list of `match_url` records for downstream processing.
+
+    Examples:
+        Basic (MLS 2025):
+        >>> Competition().choose_competition("mls", "2025")
+        True
+
+        Apertura/Clausura example (Liga MX):
+        >>> Competition().choose_competition("liga-mx", "2023-2024", open_close_league="Apertura")
+        True
     """
     def __init__(self):
+        """Initialize with empty name/year placeholders.
+
+        Examples:
+            >>> c = Competition(); (c.competition_name, c.year)
+            (None, None)
+        """
         self.competition_name = None
         self.year = None
 
 
 
     def __repr__(self):
+        """Return a concise summary of the selected competition.
+
+        Examples:
+            >>> c = Competition(); c.competition_name, c.year = "mls", "2025"
+            >>> repr(c)
+            'Competition Name: mls, Year: 2025'
+        """
         return f"Competition Name: {self.competition_name}, Year: {self.year}" 
 
 
 
     def choose_competition(self, competition_name: str,competition_year: str, open_close_league:str="", manual_competition_id:str="")->bool:
-        """
-        Loads competition data and saves it as a CSV using PySpark.
+        """Resolve a competition from the watchlist and persist its match links.
+
+        Reads `all_comps_df/`, finds the `competition_id` (optionally with manual override
+        or Apertura/Clausura), scrapes match URLs, and writes `<dir>/<name>_<year>.csv`.
 
         Args:
-            competition_name (str): Name of the competition (e.g., 'premier-league').
-            competition_year (str): Year or season of the competition (e.g., '2023' or '2020-2021').
-            open_close_league (str, optional): For leagues with Apertura/Clausura style splits.
-            manual_competition_id (str, optional): Override to manually specify competition ID.
+            competition_name: Normalized league name (e.g., "premier-league").
+            competition_year: Season label (e.g., "2023" or "2020-2021").
+            open_close_league: Subseason label (e.g., "Apertura", "Clausura"). Optional.
+            manual_competition_id: Explicit FotMob competition ID to disambiguate. Optional.
 
         Returns:
-            bool: True if data was saved successfully, False otherwise.
+            bool: True if CSV written successfully, False if the competition was not found.
 
-        Example:
-            >>> comp = Competition()
-            >>> comp.choose_competition("premier-league", "2023")
+        Examples:
+            Premier League with manual ID:
+            >>> Competition().choose_competition("premier-league", "2023", manual_competition_id="47")
+            True
+
+            Liga MX Clausura:
+            >>> Competition().choose_competition("liga-mx", "2022-2023", open_close_league="Clausura")
+            True
         """
-
         if open_close_league and not manual_competition_id:
             comp_dir = f"{competition_name}_{competition_year}_{open_close_league}_dir"
         elif not open_close_league and manual_competition_id:
@@ -279,13 +364,6 @@ class Competition:
         else:
             comp_dir = f"{competition_name}_{competition_year}_dir"
 
-
-        # # Early exit if local data already exists
-        # csv_path = os.path.join(comp_dir, f"{competition_name}_{competition_year}.csv")
-        # if os.path.exists(csv_path):
-        #     logging.info(f"[SKIPPED] Competition data already exists locally at {csv_path}")
-        #     return False   
-
         spark_sess = SparkSession.builder.appName("SingleCompetitionSession").getOrCreate()
         df = spark_sess.read.csv(path=f"all_comps_df", header=True, inferSchema=True)
         print(df.show(), "\n\n")
@@ -294,7 +372,6 @@ class Competition:
             single_competition_collection = df.select(df.competition_name, df.competition_id).filter(df.competition_name == competition_name).collect()
         else:
             single_competition_collection = df.select(df.competition_name, df.competition_id).filter((df.competition_name == competition_name) & (df.competition_id == manual_competition_id)).collect()
-        # print(f"Single Comp ID {df.competition_name.show()} - {df.competition_id.show()}")
         try:
             competition_name = single_competition_collection[0].competition_name
         except IndexError as e:
@@ -315,22 +392,23 @@ class Competition:
 
 
     def contain_all_match_links(self, competition_id: int, competition_name: str, competition_year: str, open_close_league:str="") -> List[str]:
-        """
-        Extracts all match URLs for the given competition by paginating through match listing pages.
+        """Collect all unique match URLs for a competition by paging the listing.
 
         Args:
-            competition_id (int): Fotmob internal competition ID.
-            competition_name (str): Name of the competition.
-            competition_year (str): Season or year (e.g., '2023').
-            open_close_league (str, optional): Apertura/Clausura suffix (e.g., 'Apertura').
+            competition_id: FotMob competition ID.
+            competition_name: Normalized competition name.
+            competition_year: Season or year string (e.g., "2023").
+            open_close_league: Optional subseason label for split leagues.
 
         Returns:
-            List[str]: A list of unique match URLs.
+            List[str]: De-duplicated list of match URLs.
 
-        Example:
-            >>> comp = Competition()
-            >>> match_links = comp.contain_all_match_links(44, "premier-league", "2023")
-            >>> print(match_links[:5])
+        Notes:
+            Sleeps between page requests to reduce risk of throttling.
+
+        Examples:
+            >>> Competition().contain_all_match_links(47, "premier-league", "2023")[:5]  # doctest: +ELLIPSIS
+            ['https://www.fotmob.com/matches/...', ...]
         """
         all_links = set() 
         page_number = 0
@@ -362,22 +440,21 @@ class Competition:
 
 
     def extract_match_links_per_page(self, url: str)-> List:
-        """
-        Extracts all match links from a single Fotmob competition matches page.
+        """Extract match links from a single competition matches page.
+
+        Parses embedded scripts for `/matches/...#<id>` occurrences, builds absolute
+        URLs, and de-duplicates links found across script tags.
 
         Args:
-            url (str): The URL of the page to scrape.
+            url: FotMob competition matches page URL (single page).
 
         Returns:
-            List[str]: A list of match URLs found on that page.
+            List[str]: Unique match URLs discovered on the page.
 
-        Example:
-            >>> comp = Competition()
-            >>> links = comp.extract_match_links_per_page("https://www.fotmob.com/leagues/44/matches/premier-league?season=2023&page=0")
-            >>> print(links[:3])
+        Examples:
+            >>> Competition().extract_match_links_per_page("https://www.fotmob.com/leagues/44/matches/premier-league?season=2023&page=0")[:3]  
+            ['https://www.fotmob.com/matches/...', ...]
         """
-        # ~ 86 match links per page * 37 pages = 3182 matches ......however.......
-        # The first 3-4 embedded html pages usually contain all the unique match links, with the rest of pages returning duplicate match links 
         html_doc = requests.get(url)
         html_doc_text = html_doc.text
         soup = BeautifulSoup(html_doc_text, "html.parser")
@@ -421,55 +498,62 @@ class Competition:
 
 
 class Match:
-    """
-    Handles extraction and storage of player statistics for individual matches.
+    """Extract and persist per-match player statistics.
 
-    Args:
-        None
+    Loads the Stats tab (headless Chrome), parses a fallback HTML table and embedded
+    JSON to collect player SPI ratings and metadata, then writes combined results.
 
-    Returns:
-        None
-
-    Example:
-        >>> match_stats = Match()
-        >>> match_stats.choose_match("mls", "2023")
-
-    Methods:
-        choose_match(competition_name, competition_year, open_close_league="", overide=False, manual_competition_id="", fallback=False):
-            Iterates through matches for a given competition and year, extracting player stats.
-
-        extract_single_match_players_stats(url, fallback=False):
-            Extracts all player statistics from a given match URL using Selenium and BeautifulSoup.
+    Examples:
+        Resume mode (only fill missing stats):
+        >>> Match().choose_match("open-cup", "2025", overide=False)
+        # writes 'open-cup_2025_match_stats.csv' under the competition dir
     """
     def __init__(self):
-        self.match_id = "pachuca-vs-botafogo-rj/27qfw0#4683429"
-        self.x_mas_value= self.get_x_mas(self.match_id)
+        """No-op initializer for Match extraction helper.
 
+        Examples:
+            >>> Match()
+            Match()
+        """
+        pass
 
 
 
     def __repr__(self):
+        """Return a simple identifier for the Match helper.
+
+        Examples:
+            >>> repr(Match())
+            'Match()'
+        """
+        # Change
         return "Match()"
     
 
 
-    def choose_match(self, competition_name: str, competition_year: str, open_close_league:str="", overide:bool=True, manual_competition_id:str="", fallback:bool=False)->None:
-        """
-        Processes match data and extracts player statistics, saving them to a CSV file.
+    def choose_match(self, competition_name: str, competition_year: str, open_close_league:str="", overide:bool=True, manual_competition_id:str="")->None:
+        """Iterate season match URLs and collect player stats.
+
+        Reads `<comp_dir>/<name>_<year>.csv`, iterates `match_url` values, and aggregates
+        player statistics into `<name>_<year>_match_stats.csv`. If `overide=False` and a
+        stats CSV exists, resumes by only filling rows with empty `player_stats`.
 
         Args:
-            competition_name (str): Name of the competition (e.g., "premier-league").
-            competition_year (str): Year or season of the competition (e.g., "2023").
-            open_close_league (str, optional): Optional suffix like "Apertura" or "Clausura". Defaults to "".
-            overide (bool, optional): Whether to recompute stats for already processed matches. Defaults to True.
-            manual_competition_id (str, optional): Optionally override the competition ID string for naming folders. Defaults to "".
+            competition_name: Normalized league name.
+            competition_year: Season label.
+            open_close_league: Optional subseason label.
+            overide: If True, recompute all; if False, only fill missing matches.
+            manual_competition_id: Optional override to disambiguate directory.
 
         Returns:
-            None: Outputs a CSV file containing match metadata and player statistics for each match.
+            None
 
-        Example:
-            >>> match_obj = Match()
-            >>> match_obj.choose_match("premier-league", "2023", open_close_league="", overide=False, fallback=False)
+        Examples:
+            Recompute everything for MLS 2025:
+            >>> Match().choose_match("mls", "2025", overide=True)
+
+            Resume a prior run for World Cup 2018 (ID override in folder name):
+            >>> Match().choose_match("world-cup", "2018", manual_competition_id="77", overide=False)
         """
         spark_sess = SparkSession.builder.appName("MatchSession").getOrCreate()
 
@@ -536,12 +620,8 @@ class Match:
         count = 0
         number_of_matches = len(all_match_links)
 
-        # temp - https://www.fotmob.com/matches/toronto-fc-vs-fc-cincinnati/3vaemjyi#4085040
-        # all_match_links = all_match_links[::-1]
-        # all_match_links = ["https://www.fotmob.com/matches/toronto-fc-vs-fc-cincinnati/3vaemjyi#4085040"]
-
         for match_link in all_match_links:
-        # Uncomment to extract the stats for the first 3 matches instead of testing the program over the entire season    
+        # Uncomment to extract the stats only from the first 3 matches instead of testing the program over the entire season    
         # for match_link in all_match_links[:3]:
 
             count += 1
@@ -555,21 +635,14 @@ class Match:
             logging.info(f"Processing {count}/{number_of_matches} matches: {match_link}")
 
             # Extract player stats
-            print(f"Extracting player stats for match: {match_link}")
-            player_stats = self.extract_single_match_players_stats(match_link, fallback)
+            player_stats = self.extract_single_match_players_stats(match_link)
             logging.info(f"All player stats: {player_stats}")
-
-
-
 
 
             # Append as a Row with match_url and player_stats (as JSON string)
             all_player_stats.append(
                 Row(match_url=match_link, player_stats=json.dumps(player_stats))
             )
-
-            # if match_link == "https://www.fotmob.com/matches/toronto-fc-vs-fc-cincinnati/3vaemjyi#4085040":
-            #     break
 
         if not overide:
             all_player_stats = all_player_stats + finished_match_links
@@ -600,7 +673,41 @@ class Match:
         chrome_options.add_argument("--disable-gpu")
         chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
-        driver = webdriver.Chrome(options=chrome_options)
+    def extract_single_match_players_stats(self, url: str) -> List[Dict]:
+        """Scrape the Stats tab for a single match and return player stats.
+
+        Uses headless Chrome to load `:tab=stats`, then parses fallback HTML and embedded
+        lineup JSON to assemble player records:
+        - Player_ID (str)
+        - Player_Name (str)
+        - Shirt_Number (str/int-like or 'NA')
+        - Country (str or 'NA')
+        - Team_Name (str or 'NA')
+        - SPI_Score (stringified numeric; '-1.0' when missing)
+
+        Args:
+            url: Base match URL (without the ':tab=stats' suffix).
+
+        Returns:
+            List[Dict[str, Any]]: Player statistic dictionaries for the match.
+
+        Raises:
+            WebDriverException: If Chrome cannot be started or the page fails to load.
+
+        Examples:
+            >>> Match().extract_single_match_players_stats("https://www.fotmob.com/matches/toronto-fc-vs-fc-cincinnati/3vaemjyi#4085040") 
+            [{'Player_ID': '...', 'Player_Name': '...', ...}, ...]
+        """
+
+        options = Options()
+        options.add_argument("--headless")
+        driver = webdriver.Chrome(options=options)
+        driver.get(url + ":tab=stats")
+        time.sleep(5)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        driver.quit()
+
+        player_stats: List[Dict] = []
 
         try:
             driver.get(f"https://www.fotmob.com/matches/{match_url_part}")
@@ -626,48 +733,10 @@ class Match:
         return x_mas
 
 
-
-    def extract_single_match_players_stats(self, url: str, fallback:bool=False) -> List[Dict]:
-
-        headers = {
-            'sec-ch-ua-platform': '"macOS"',
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-            'x-mas': self.x_mas_value,
-            'sec-ch-ua': '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
-            'DNT': '1',
-            'sec-ch-ua-mobile': '?0',
-        }
-        params = {
-                'matchId': f'{url.split("#")[1]}',
-            }
-        print(f"Extracting player stats for match: {url}")
-        response = requests.get('https://www.fotmob.com/api/data/matchDetails', params=params, headers=headers)
-        player_stats: List[Dict] = []
-
-        try:
-            # Safely get the list of starters
-            starters = response.json().get('content', {}).get('lineup', {}).get('homeTeam', {}).get('starters', [])
-        except Exception as e:
-            print(f"Error extracting starters: {e}")
-            return player_stats  # Return empty list if starters not found
-
-        # Safely get playerStats dictionary
-        try:
-            player_stats_dict = response.json().get('content', {}).get('playerStats', {})
-        except Exception as e:
-            print(f"Error extracting playerStats: {e}")
-            player_stats_dict = {}
-
-        for item in starters:
-            try:
-                temp_item = {}
-                # Basic player info
-                temp_item['Player_Name'] = item.get('name', '')  
-                temp_item['Player_ID'] = item.get('id')          
-                # print(f"Player ID: {temp_item['player_id']}")
-
-                temp_item['Shirt_Number'] = str(item.get('shirtNumber', ''))  
-                temp_item['Country'] = item.get('countryName', '')           
+                # Check for minutes played 
+                if not spi_rating:
+                    # continue
+                    spi_rating = "-1.0"
 
                 # SPI rating: defaults to -1.0 if performance or rating is missing
                 temp_item['SPI_Score'] = item.get('performance', {}).get('rating', -1.0)
@@ -690,49 +759,60 @@ class Match:
 
 
 class Player:
-    """
-    This class handles processing of player statistics from match data and performs
-    basic statistical analysis such as calculating number of matches played and average SPI score.
+    """Transform match-level player stats to per-player aggregates and analysis.
 
-    Methods:
-        choose_player_stats(competition_name: str, competition_year: str, open_close_league: str = "", manual_competition_id: str = "") -> None:
-            Loads match-level player statistics, parses the player data, and saves structured player information (ID, name, shirt number, SPI score) to a CSV.
+    Two steps:
+    1) `choose_player_stats`: flatten and persist raw per-appearance stats.
+    2) `competition_analysis`: compute matches played and average SPI per player,
+        filling missing categorical fields with modal values.
 
-        competition_analysis(competition_name: str, competition_year: str, open_close_league: str = "", manual_competition_id: str = "") -> None:
-            Analyzes player statistics to compute the number of matches played and the average SPI score for each player. Results are saved to a new CSV file.
-
-    Example:
-        player_processor = Player()
-        player_processor.choose_player_stats("mls", "2023")
-        player_processor.competition_analysis("mls", "2023")
+    Examples:
+        >>> p = Player()
+        >>> p.choose_player_stats("open-cup", "2025")
+        >>> p.competition_analysis("open-cup", "2025")
     """
     def __init__(self):
+        """No-op initializer for Player processing.
+
+        Examples:
+            >>> Player()
+            Player()
+        """
         pass
 
 
     def __repr__(self):
+        """Return a simple identifier for the Player helper.
+
+        Examples:
+            >>> repr(Player())
+            'Player()'
+        """
+        # Fix
         return "Player()"
 
 
     def choose_player_stats(self, competition_name: str, competition_year: str, open_close_league:str="", manual_competition_id:str="")->None:
-        """
-        Extracts basic player statistics (player ID, name, shirt number, SPI score) from match-level 
-        player stats and stores them in a structured CSV file.
+        """Persist basic per-appearance player stats extracted from match CSV.
+
+        Reads `<comp_dir>/<name>_<year>_match_stats.csv`, expands the JSON `player_stats`
+        column into rows, and writes a flat CSV `<name>_<year>_player_stats.csv` with:
+        `player_id`, `player_name`, `player_number` (-1 if NA), `team_name`,
+        `country_name`, `spi_score` (-1.0 if NA).
 
         Args:
-            competition_name (str): Name of the competition (e.g., 'premier-league').
-            competition_year (str): Year or season of the competition (e.g., '2023').
-            open_close_league (str, optional): Subseason designation (e.g., 'Apertura' or 'Clausura').
-            manual_competition_id (str, optional): Manual override for competition ID to distinguish similar leagues.
+            competition_name: Normalized league name.
+            competition_year: Season label.
+            open_close_league: Optional subseason label.
+            manual_competition_id: Optional override to disambiguate directory.
 
         Returns:
             None
 
-        Example:
-            >>> player = Player()
-            >>> player.choose_player_stats("premier-league", "2023")
-            >>> # Outputs player stats to 'premier-league_2023_dir/premier-league_2023_player_stats.csv'
+        Examples:
+            >>> Player().choose_player_stats("mls", "2025")
         """
+
         spark_sess = SparkSession.builder.appName("PlayerStatsSession").getOrCreate()
 
         if open_close_league and not manual_competition_id:
@@ -758,9 +838,6 @@ class Player:
         all_team_names = []
         all_country_names = []
         all_spi_scores = []
-
-        # player_lookup_dict = {}
-
 
         for row in match_rows:
             # List of player dictionaries
@@ -803,7 +880,6 @@ class Player:
         ])
 
         new_df = spark_sess.createDataFrame(data, schema=new_schema)
-        # new_df = new_df.select("player_id", "player_name", "player_number", "spi_score").dropDuplicates(["player_id"])
         new_df.write.mode("overwrite").csv(
                 f"{comp_dir}/{competition_name}_{competition_year}_player_stats.csv",
                 header=True
@@ -818,20 +894,25 @@ class Player:
 
 
     def competition_analysis(self, competition_name: str, competition_year: str, open_close_league:str="", manual_competition_id:str="")->None:
-        """
-        Analyzes player statistics by computing matches played and average SPI score,
-        and fills missing player details (team, number, country) using mode values.
+        """Compute matches played and average SPI per player; fill missing fields.
 
-        Saves the final cleaned stats as CSV.
+        Steps:
+        - Filter out players where invalid SPI counts (-1.0) exceed valid counts.
+        - Compute average SPI excluding -1.0 values.
+        - Compute per-player modal values for name, number, team, and country.
+        - Write `<name>_<year>_player_stats_analysis.csv` sorted by avg SPI (desc).
 
         Args:
-            competition_name (str): Competition name (e.g., 'open-cup').
-            competition_year (str): Competition year (e.g., '2022').
-            open_close_league (str, optional): Subseason label (e.g., 'Clausura').
-            manual_competition_id (str, optional): Manual competition ID.
+            competition_name: Normalized league name.
+            competition_year: Season label.
+            open_close_league: Optional subseason label.
+            manual_competition_id: Optional override to disambiguate directory.
 
         Returns:
             None
+
+        Examples:
+            >>> Player().competition_analysis("mls", "2025")
         """
         spark = SparkSession.builder.appName("CompetitionAnalysis").getOrCreate()
 
@@ -849,21 +930,7 @@ class Player:
         # Compute matches played per player
         matches_played_per_player = df.groupBy("player_id").count()
 
-        # Count the spi_scores that ARE -1.0
-        # Count the spi_scores that are NOT -1.0
-
-        # if there are more -1.0 values that non -1.0 values, then skip this player entirely from being added to player analysis csv output
-
-
-        # # Compute average SPI score per player
-        # avg_spi_per_player = (
-        #     df.filter(F.col("spi_score") != -1.0)
-        #     .groupBy("player_id")
-        #     .agg(F.avg("spi_score").alias("avg_spi_score"))
-        # )
-
-
-        # Count -1.0 and non -1.0 spi_scores per player
+        # Count the -1.0 and non -1.0 spi_scores per player
         player_counts = (
             df.groupBy("player_id")
             .agg(
@@ -884,7 +951,6 @@ class Player:
             .groupBy("player_id")
             .agg(F.avg("spi_score").alias("avg_spi_score"))
         )
-
 
         # Helper to find the mode (most frequent) value per player for a column
         def mode_column(df, group_col, target_col):
@@ -934,47 +1000,73 @@ class Player:
 
 
 class MVP:
-    """
-    Calculates the Most Valuable Player (MVP) based on SPI scores and match statistics.
+    """Compute MVP rankings from per-player aggregates and render results.
 
-    This class uses SPI and participation data to rank players in a given competition.
-    It outputs both a complete and a filtered (top percentile) MVP ranking.
+    Reads the per-player analysis CSV, scales SPI (power `scalar`) and matches
+    played, multiplies to `mvp_scaled`, writes full results plus a top percentile
+    slice, and saves a color-graded PNG table for quick review.
 
-    Example:
+    Examples:
         >>> mvp = MVP()
-        >>> mvp.compute_mvp("premier-league", "2023")
+        >>> mvp.compute_mvp("open-cup", "2025", scalar=14)
+        # writes CSVs and an image under the competition directory
     """
+
     def __init__(self):
+        """No-op initializer for MVP computation helper.
+
+        Examples:
+            >>> MVP()
+            <__main__.MVP object at ...>  # doctest: +ELLIPSIS
+        """
         pass
 
 
 
     def __repr__(self):
+        """Return a simple identifier for the MVP helper.
+
+        Examples:
+            >>> repr(MVP())  # default object repr
+            '<__main__.MVP object at ...>'  # doctest: +ELLIPSIS
+        """
         pass
 
     def compute_mvp(self, competition_name: str, competition_year: str, scalar: int=4, open_close_league:str="", title:str="", percentile_threshold:float=.98, manual_competition_id:str="", min_req_matches:bool=True)->None:
-        """
-        Computes and ranks MVPs for a given competition season using SPI and match data.
+        """Compute and persist MVP rankings for a given competition/season.
 
-        The method reads statistics, calculates weighted scores, and outputs
-        CSV and image files showing MVP rankings.
+        Workflow:
+        - Read `<name>_<year>_player_stats_analysis.csv`.
+        - Determine max matches played and max avg SPI (subject to min matches).
+        - Scale SPI by `scalar` power and normalize; scale matches by max games.
+        - Compute `mvp_scaled = spi_scaled * matches_scaled`.
+        - Write full results and top `percentile_threshold` slice.
+        - Render the top slice as a PNG table.
 
         Args:
-            competition_name (str): Name of the competition (e.g., 'premier-league').
-            competition_year (str): Year or season (e.g., '2023' or '2020-2021').
-            scalar (int, optional): Power to scale SPI impact. Defaults to 4.
-            open_close_league (str, optional): For leagues with split formats like Apertura/Clausura.
-            title (str, optional): Optional title for the MVP output image.
-            percentile_threshold (float, optional): Filter for top MVPs by percentile. Defaults to 0.98.
-            manual_competition_id (str, optional): Optional override for competition ID.
+            competition_name: Normalized league name.
+            competition_year: Season label.
+            scalar: Exponent applied to SPI before normalization (<= 100).
+            open_close_league: Optional subseason label for folder naming and titles.
+            title: Optional custom title for the PNG image.
+            percentile_threshold: Quantile filter for the top slice (0 < p < 1).
+            manual_competition_id: Optional override to disambiguate directory.
+            min_req_matches: If True, require a fraction of max matches; if False, the full max.
 
         Returns:
-            None: Outputs files but does not return objects.
+            None
 
-        Example:
-            >>> mvp = MVP()
-            >>> mvp.compute_mvp("la-liga", "2022", scalar=5, title="La Liga MVPs")
+        Raises:
+            AssertionError: If `scalar > 100` or percentile not in (0, 1).
+
+        Examples:
+            Common flow (after `Player.competition_analysis`):
+            >>> MVP().compute_mvp("mls", "2025", scalar=4, title="MLS MVPs 2025", percentile_threshold=0.98, overide=False)
+
+            Strict min-matches with manual ID:
+            >>> MVP().compute_mvp("world-cup", "2018", scalar=14, manual_competition_id="77", min_req_matches=False, overide=False)
         """
+
         assert scalar <= 100
         spark_sess = SparkSession.builder.appName("MVPSession").getOrCreate()
 
@@ -1058,20 +1150,29 @@ class MVP:
 
 
     def save_dataframe_as_image(self, df, competition_name, competition_year, comp_dir, open_close_league, title:str="")->None:
-        """
-        Saves a Pandas DataFrame as a styled PNG image.
+        """Render a Pandas DataFrame to a color-graded PNG for quick sharing.
+
+        Saves:
+            `<comp_dir>/<competition_name>_<competition_year>_mvp_results_image.png`
+
+        Color intensity encodes `mvp_scaled`.
 
         Args:
-            df (pd.DataFrame): The DataFrame to render.
-            path (str): Path where the image will be saved.
-            title (str, optional): Title to display above the table. Defaults to "".
+            df: Pandas DataFrame with an `mvp_scaled` column and visible columns to render.
+            competition_name: Normalized league name.
+            competition_year: Season label.
+            comp_dir: Directory to store output artifacts.
+            open_close_league: Optional subseason label for title composition.
+            title: Optional custom title to display above the table.
 
         Returns:
             None
 
-        Example:
-            >>> mvp.save_dataframe_as_image(df, "./mvp_output/mvp_top_1percent.png", title="Top MVPs")
+        Examples:
+            >>> # after computing MVPs and converting Spark DF to Pandas:
+            >>> MVP().save_dataframe_as_image(df, "mls", "2025", "mls_2025_dir", "", title="Top 2% MLS MVPs")
         """
+
         image_path = f"{comp_dir}/{competition_name}_{competition_year}_mvp_results_image.png"
 
         # Normalize the mvp_scaled column to [0, 1]
@@ -1124,26 +1225,37 @@ class MVP:
 
 
 
-def workflow_compute_mvp(competition_name: str, competition_year: int, scalar: int=4, open_close_league:str="", overide:bool=True, title:str="", percentile_threshold:float=.98, manual_competition_id:str="", fallback:bool=False, min_req_matches:bool=True)->str:
-    """
-    Executes the full MVP (Most Valuable Player) workflow for a given competition and season.
+def workflow_compute_mvp(competition_name: str, competition_year: int, scalar: int=4, open_close_league:str="", overide:bool=True, title:str="", percentile_threshold:float=.98, manual_competition_id:str="", min_req_matches:bool=True)->str:
+    """Run the full MVP pipeline end-to-end for a given league and season.
+
+    Steps:
+    1) (Optional) Resolve competition and write match URLs (`Competition`).
+    2) Scrape match stats and persist per-match player stats (`Match`).
+    3) Expand per-appearance rows into flat player stats (`Player`).
+    4) Aggregate per-player metrics (`Player.competition_analysis`).
+    5) Compute MVP rankings and render outputs (`MVP`).
 
     Args:
-        competition_name (str): Name of the competition (e.g., 'premier-league').
-        competition_year (int): The season or year of the competition (e.g., 2023).
-        scalar (int, optional): Weight scalar used in MVP computation. Defaults to 4.
-        open_close_league (str, optional): For leagues that split into Apertura/Clausura or similar formats. Defaults to "".
-        overide (bool, optional): Whether to override and run the data scraping even if it's already been done. Defaults to True.
-        title (str, optional): Optional title label for the MVP award or output. Defaults to "".
-        percentile_threshold (float, optional): Threshold to identify top-performing players. Defaults to 0.98.
-        manual_competition_id (str, optional): Manually specify a competition ID to override internal matching. Defaults to "".
+        competition_name: Normalized league name (e.g., "premier-league").
+        competition_year: Season label (e.g., 2023).
+        scalar: Exponent used to scale SPI impact (default 4).
+        open_close_league: Optional subseason label (e.g., "Apertura").
+        overide: If True, always re-scrape match links; else resume incomplete runs.
+        title: Optional custom title for the MVP image.
+        percentile_threshold: Quantile (0–1) to select the top slice (default 0.98).
+        manual_competition_id: Optional manual override for competition ID.
+        min_req_matches: If True, require only a fraction of max matches; else strict.
 
     Returns:
-        str: Confirmation message that MVP has been computed, or an instructional message if setup is incomplete.
+        str: Completion message, or guidance if the competition must be added first.
 
-    Example:
-        >>> workflow_compute_mvp("premier-league", 2023)
-        'Most Valuable Player has been unvailed from competition premier-league during the year 2023'
+    Examples:
+        Quick start:
+        >>> all_comps = AllCompetitions()
+        >>> ids = all_comps.gather_all_competition_ids("https://www.fotmob.com/leagues")  # run
+        >>> all_comps.add_competition_to_my_watchlist("open-cup", ids)
+        >>> workflow_compute_mvp("open-cup", 2025, scalar=14, overide=False)
+        'Most Valuable Player has been unvailed from competition open-cup during the year 2025'
     """
     competition_year = str(competition_year)
 
@@ -1161,7 +1273,7 @@ def workflow_compute_mvp(competition_name: str, competition_year: int, scalar: i
                 """
         
     match = Match()
-    logging.info(match.choose_match(competition_name, competition_year, open_close_league, overide, manual_competition_id=manual_competition_id, fallback=fallback)) # run
+    logging.info(match.choose_match(competition_name, competition_year, open_close_league, overide, manual_competition_id=manual_competition_id)) # run
     player = Player()
     logging.info(player.choose_player_stats(competition_name, competition_year, open_close_league, manual_competition_id=manual_competition_id)) # run both 
     logging.info(player.competition_analysis(competition_name, competition_year, open_close_league, manual_competition_id=manual_competition_id)) # run both
@@ -1183,15 +1295,15 @@ def workflow_compute_mvp(competition_name: str, competition_year: int, scalar: i
 
 
 
-if __name__ == "__main__":
-#     # Workflow 1A - add a competetion
-    all_comps = AllCompetitions()
-    all_comp_info = all_comps.gather_all_competition_ids("https://www.fotmob.com/") # run
-    print(all_comp_info)
+# if __name__ == "__main__":
+# #     # Workflow 1A - add a competetion
+#     all_comps = AllCompetitions()
+#     all_comp_info = all_comps.gather_all_competition_ids("https://www.fotmob.com/") # run
+#     print(all_comp_info)
 
-# #     # Sample Test 1
-    print(all_comps.add_competition_to_my_watchlist(competition_name="fifa-intercontinental-cup", gather_all_competition_ids=all_comp_info))
-    print(workflow_compute_mvp(competition_name="fifa-intercontinental-cup", competition_year="2024", scalar=14))
+#     # Sample Test 1
+#     print(all_comps.add_competition_to_my_watchlist(competition_name="fifa-intercontinental-cup", gather_all_competition_ids=all_comp_info))
+#     print(workflow_compute_mvp(competition_name="fifa-intercontinental-cup", competition_year="2024", scalar=14, min_req_matches=False))
 
 # #     # Sample Test 2
 # #     print(all_comps.add_competition_to_my_watchlist(competition_name="world-cup", gather_all_competition_ids=all_comp_info, defined_url="https://www.fotmob.com/leagues/77/matches/world-cup"))#     # print(workflow_compute_mvp(competition_name="world-cup", competition_year="2010", manual_competition_id="77", scalar=14, min_req_matches=False))
